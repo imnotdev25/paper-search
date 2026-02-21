@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# ── Project metadata ───────────────────────────────────────────────────────────
+[project]
+name = "paper-mcp"
+version = "0.0.1"
+description = "MCP server that retrieves academic papers by title — metadata, PDF, full text, citations, references."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Bhvaik", email = "imnotdev@proton.me" }]
+keywords = ["mcp", "academic", "papers", "arxiv", "semantic-scholar", "fastmcp", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Internet :: WWW/HTTP",
+]
+
+dependencies = [
+    "fastmcp>=2.0.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+]
+
+# ── CLI entry point (the key bit for `uvx paper-search-mcp`) ──────────────────
+[project.scripts]
+paper-search-mcp = "paper_search_mcp.server:main"
+
+# ── Optional: links shown on PyPI ─────────────────────────────────────────────
+[project.urls]
+Homepage    = "https://github.com/imnotdev25/paper-search-mcp"
+Repository  = "https://github.com/imnotdev25/paper-search-mcp"
+Issues      = "https://github.com/imnotdev25/paper-search-mcp/issues"
+
+# ── Hatchling: tell it where the package lives ────────────────────────────────
+[tool.hatch.build.targets.wheel]
+packages = ["src/paper_search_mcp"]
+
+# ── uv project settings ───────────────────────────────────────────────────────
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
