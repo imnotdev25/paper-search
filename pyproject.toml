@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 # ── Project metadata ───────────────────────────────────────────────────────────
 [project]
 name = "paper-mcp"
-version = "0.0.1"
+version = "0.4.0"
 description = "MCP server that retrieves academic papers by title — metadata, PDF, full text, citations, references."
 readme = "README.md"
 license = { text = "MIT" }
@@ -30,19 +30,19 @@ dependencies = [
     "pydantic>=2.0.0",
 ]
 
-# ── CLI entry point (the key bit for `uvx paper-search-mcp`) ──────────────────
+# ── CLI entry point (the key bit for `uvx paper-mcp`) ──────────────────
 [project.scripts]
-paper-search-mcp = "paper_search_mcp.server:main"
+paper-mcp = "paper_mcp.server:main"
 
 # ── Optional: links shown on PyPI ─────────────────────────────────────────────
 [project.urls]
-Homepage    = "https://github.com/imnotdev25/paper-search-mcp"
-Repository  = "https://github.com/imnotdev25/paper-search-mcp"
-Issues      = "https://github.com/imnotdev25/paper-search-mcp/issues"
+Homepage    = "https://github.com/imnotdev25/paper-search"
+Repository  = "https://github.com/imnotdev25/paper-search"
+Issues      = "https://github.com/imnotdev25/paper-search/issues"
 
 # ── Hatchling: tell it where the package lives ────────────────────────────────
 [tool.hatch.build.targets.wheel]
-packages = ["src/paper_search_mcp"]
+packages = ["src/paper_mcp"]
 
 # ── uv project settings ───────────────────────────────────────────────────────
 [tool.uv]

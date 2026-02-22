@@ -11,12 +11,12 @@ Retrieves academic papers by title using:
 Most tools accept paper_title (str); the DOI→metadata tool accepts doi (str).
 
 Run via uvx:
-  uvx paper-search-mcp                    # stdio (default)
-  uvx paper-search-mcp --transport sse    # SSE on port 8000
+  uvx paper-mcp                    # stdio (default)
+  uvx paper-mcp --transport sse    # SSE on port 8000
 
 Run locally with uv:
-  uv run paper-search-mcp
-  uv run paper-search-mcp --transport sse
+  uv run paper-mcp
+  uv run paper-mcp --transport sse
 """
 
 import argparse
@@ -90,7 +90,7 @@ async def lifespan(server: FastMCP):
 # ── Server ────────────────────────────────────────────────────────────────────
 
 mcp = FastMCP(
-    "paper_search_mcp",
+    "paper_mcp",
     lifespan=lifespan,
 )
 
@@ -835,9 +835,9 @@ async def doi_get_metadata(params: DoiInput, ctx: Context) -> str:
 
 
 def main() -> None:
-    """CLI entry point — called by `uvx paper-search-mcp` or `uv run paper-search-mcp`."""
+    """CLI entry point — called by `uvx paper-mcp` or `uv run paper-mcp`."""
     parser = argparse.ArgumentParser(
-        prog="paper-search-mcp",
+        prog="paper-mcp",
         description="Academic Paper Search MCP Server (FastMCP + Lightpanda browser)",
     )
     parser.add_argument(

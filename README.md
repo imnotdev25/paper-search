@@ -1,4 +1,4 @@
-# 📄 paper-search-mcp
+# 📄 paper-mcp
 
 An MCP server built with **FastMCP** that lets Claude (or any LLM) retrieve academic papers **by title**.  
 Run it in one command with **uvx** — no manual install needed.
@@ -27,10 +27,10 @@ Data sources (priority order): **Semantic Scholar → arXiv → Unpaywall → Li
 
 ```bash
 # stdio mode — for Claude Desktop / most MCP clients
-uvx paper-search-mcp
+uvx paper-mcp
 
 # SSE mode — for remote or multi-client setups
-uvx paper-search-mcp --transport sse --port 8000
+uvx paper-mcp --transport sse --port 8000
 ```
 
 > `uvx` downloads, installs (in an isolated env), and runs the package — zero setup.
@@ -38,19 +38,19 @@ uvx paper-search-mcp --transport sse --port 8000
 ### Install permanently
 
 ```bash
-uv tool install paper-search-mcp
-paper-search-mcp                        # now available globally
-paper-search-mcp --transport sse
+uv tool install paper-mcp
+paper-mcp                        # now available globally
+paper-mcp --transport sse
 ```
 
 ### Local development
 
 ```bash
-git clone https://github.com/yourname/paper-search-mcp
-cd paper-search-mcp
+git clone https://github.com/imnotdev25/paper-search
+cd paper-search
 uv sync                                 # install all deps from pyproject.toml
-uv run paper-search-mcp                 # run directly
-uv run paper-search-mcp --transport sse
+uv run paper-mcp                 # run directly
+uv run paper-mcp --transport sse
 ```
 
 ---
@@ -64,7 +64,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "papers": {
       "command": "uvx",
-      "args": ["paper-search-mcp"]
+      "args": ["paper-mcp"]
     }
   }
 }
@@ -100,7 +100,7 @@ paths fall back to abstract/metadata gracefully.
 Claude (LLM)
     │  MCP (stdio or SSE)
     ▼
-paper-search-mcp  [FastMCP, Python]
+paper-mcp  [FastMCP, Python]
     │
     ├── Semantic Scholar API  ──  metadata, citations, references
     ├── arXiv API + HTML      ──  preprint info + full text
@@ -122,14 +122,14 @@ uv build
 uv publish --token $PYPI_TOKEN
 ```
 
-Once on PyPI, anyone can run it with `uvx paper-search-mcp`.
+Once on PyPI, anyone can run it with `uvx paper-mcp`.
 
 ---
 
 ## ⚙️ CLI Options
 
 ```
-usage: paper-search-mcp [-h] [--transport {stdio,sse}] [--port PORT] [--host HOST]
+usage: paper-mcp [-h] [--transport {stdio,sse}] [--port PORT] [--host HOST]
 
 options:
   --transport  stdio (default) or sse
@@ -152,11 +152,11 @@ options:
 ## 📁 Project Structure
 
 ```
-paper-search-mcp/
+paper-mcp/
 ├── pyproject.toml                  ← packaging, entry point, deps
 ├── README.md
 └── src/
-    └── paper_search_mcp/
+    └── paper_mcp/
         ├── __init__.py
         └── server.py               ← all 5 FastMCP tools + main()
 ```
