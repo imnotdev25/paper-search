@@ -11,12 +11,12 @@ Retrieves academic papers by title using:
 Most tools accept paper_title (str); the DOI→metadata tool accepts doi (str).
 
 Run via uvx:
-  uvx paper-mcp                    # stdio (default)
-  uvx paper-mcp --transport sse    # SSE on port 8000
+  uvx paper-search-mcp                    # stdio (default)
+  uvx paper-search-mcp --transport sse    # SSE on port 8000
 
 Run locally with uv:
-  uv run paper-mcp
-  uv run paper-mcp --transport sse
+  uv run paper-search-mcp
+  uv run paper-search-mcp --transport sse
 """
 
 import argparse
@@ -90,7 +90,7 @@ async def lifespan(server: FastMCP):
 # ── Server ────────────────────────────────────────────────────────────────────
 
 mcp = FastMCP(
-    "paper_mcp",
+    "paper_search_mcp",
     lifespan=lifespan,
 )
 
@@ -119,14 +119,89 @@ class PaperInput(BaseModel):
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
+# Semantic Scholar official status-code descriptions
+_S2_STATUS: dict[int, str] = {
+    200: "OK — request successful.",
+    400: "Bad Request — the server could not understand your request. Check your parameters.",
+    401: "Unauthorized — not authenticated or credentials are invalid.",
+    403: "Forbidden — server understood the request but refused it; you lack permission.",
+    404: "Not Found — the requested resource or endpoint does not exist.",
+    429: "Too Many Requests — rate limit exceeded; backing off before retry.",
+    500: "Internal Server Error — something went wrong on Semantic Scholar's side.",
+}
+
+_S2_MAX_RETRIES = 10    # maximum retry attempts on 429 / 5xx
+_S2_MAX_WAIT    = 15.0  # seconds — exponential back-off ceiling
+
+
+async def _s2_request(
+    http: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs,
+) -> httpx.Response:
+    """
+    Central Semantic Scholar HTTP wrapper with:
+      • Full status-code descriptions for 200/400/401/403/404/429/500.
+      • Exponential back-off retry for 429 and 5xx responses.
+        - Up to _S2_MAX_RETRIES (10) attempts.
+        - Wait = min(2^attempt, _S2_MAX_WAIT) seconds (hard-capped at 15 s).
+        - Respects the Retry-After response header when present on 429.
+      • Raises httpx.HTTPStatusError with an enriched message on final failure.
+    """
+    last_exc: Optional[httpx.HTTPStatusError] = None
+
+    for attempt in range(_S2_MAX_RETRIES + 1):
+        r = await http.request(method, url, **kwargs)
+
+        if r.status_code == 200:
+            return r
+
+        status_msg = _S2_STATUS.get(r.status_code, f"HTTP {r.status_code} — unexpected status.")
+
+        # Non-retryable client errors — surface immediately with clear message
+        if r.status_code in (400, 401, 403, 404):
+            raise httpx.HTTPStatusError(
+                f"Semantic Scholar {r.status_code}: {status_msg}",
+                request=r.request,
+                response=r,
+            )
+
+        # 429 or 5xx — retryable with exponential back-off
+        if r.status_code == 429 or r.status_code >= 500:
+            if attempt == _S2_MAX_RETRIES:
+                last_exc = httpx.HTTPStatusError(
+                    f"Semantic Scholar {r.status_code}: {status_msg} "
+                    f"(gave up after {_S2_MAX_RETRIES} retries)",
+                    request=r.request,
+                    response=r,
+                )
+                break
+
+            # Honour Retry-After when the server provides it
+            retry_after = r.headers.get("Retry-After", "")
+            if retry_after.isdigit():
+                wait = min(float(retry_after), _S2_MAX_WAIT)
+            else:
+                wait = min(2.0 ** attempt, _S2_MAX_WAIT)
+
+            await asyncio.sleep(wait)
+            continue
+
+        # Any other unexpected status
+        r.raise_for_status()
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unexpected exit from _s2_request retry loop")
+
 
 async def _s2_search(http: httpx.AsyncClient, title: str) -> Optional[dict]:
     """Search Semantic Scholar by title; return best-match paper dict."""
-    r = await http.get(
-        f"{S2_BASE}/paper/search",
+    r = await _s2_request(
+        http, "GET", f"{S2_BASE}/paper/search",
         params={"query": title, "limit": 1, "fields": S2_PAPER_FIELDS},
     )
-    r.raise_for_status()
     items = r.json().get("data", [])
     return items[0] if items else None
 
@@ -249,17 +324,36 @@ def _normalise_paper(paper: dict) -> dict:
 
 
 def _api_error(e: Exception) -> str:
-    """Format API errors into actionable JSON."""
+    """Format API/network errors into structured, actionable JSON.
+
+    For Semantic Scholar errors the message already contains the official
+    status-code description from _S2_STATUS (injected by _s2_request).
+    """
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
-        msgs = {
-            404: "Paper not found. Try a different title or check spelling.",
-            429: "Rate limit hit. Please wait a moment and retry.",
-            403: "Access denied by the remote API.",
+        # _s2_request embeds the human-readable description in str(e); use it
+        # directly so callers always see the full official S2 message.
+        detail = str(e)
+        # Supplement with a next-step hint for common codes
+        hints: dict[int, str] = {
+            400: "Double-check query parameters and try again.",
+            401: "Provide a valid Semantic Scholar API key via the S2_API_KEY env var.",
+            403: "Your account does not have access to this endpoint.",
+            404: "The paper or resource was not found — try a different title or DOI.",
+            429: f"Rate limit reached. The server was retried {_S2_MAX_RETRIES} times "
+                 f"with back-off up to {_S2_MAX_WAIT}s. Wait a minute, then retry.",
+            500: "Semantic Scholar is experiencing server-side issues. Try again later.",
         }
-        return json.dumps({"error": msgs.get(code, f"HTTP {code} from API.")})
+        return json.dumps({
+            "error": detail,
+            "status_code": code,
+            "hint": hints.get(code, "See https://api.semanticscholar.org for API status."),
+        })
     if isinstance(e, httpx.TimeoutException):
-        return json.dumps({"error": "Request timed out. Try again shortly."})
+        return json.dumps({
+            "error": "Request timed out.",
+            "hint": "The upstream API is slow. Try again shortly.",
+        })
     return json.dumps({"error": f"{type(e).__name__}: {e}"})
 
 
@@ -640,16 +734,18 @@ async def _crossref_metadata(http: httpx.AsyncClient, doi: str) -> Optional[dict
 
 
 async def _s2_by_doi(http: httpx.AsyncClient, doi: str) -> Optional[dict]:
-    """Look up a paper on Semantic Scholar using its DOI."""
+    """Look up a paper on Semantic Scholar using its DOI (with retry)."""
     encoded = urllib.parse.quote(doi, safe="")
-    r = await http.get(
-        f"{S2_BASE}/paper/DOI:{encoded}",
-        params={"fields": S2_PAPER_FIELDS},
-    )
-    if r.status_code == 404:
-        return None
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = await _s2_request(
+            http, "GET", f"{S2_BASE}/paper/DOI:{encoded}",
+            params={"fields": S2_PAPER_FIELDS},
+        )
+        return r.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None   # DOI simply not in S2 — non-fatal
+        raise
 
 
 async def _unpaywall_full(http: httpx.AsyncClient, doi: str) -> Optional[dict]:
@@ -835,9 +931,9 @@ async def doi_get_metadata(params: DoiInput, ctx: Context) -> str:
 
 
 def main() -> None:
-    """CLI entry point — called by `uvx paper-mcp` or `uv run paper-mcp`."""
+    """CLI entry point — called by `uvx paper-search-mcp` or `uv run paper-search-mcp`."""
     parser = argparse.ArgumentParser(
-        prog="paper-mcp",
+        prog="paper-search-mcp",
         description="Academic Paper Search MCP Server (FastMCP + Lightpanda browser)",
     )
     parser.add_argument(
@@ -867,3 +963,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
