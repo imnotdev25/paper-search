@@ -206,17 +206,93 @@ async def _s2_search(http: httpx.AsyncClient, title: str) -> Optional[dict]:
     return items[0] if items else None
 
 
+# ── arXiv retry layer ─────────────────────────────────────────────────────────
+
+# arXiv HTTP API official status-code descriptions
+_ARXIV_STATUS: dict[int, str] = {
+    200: "OK — request successful.",
+    400: "Bad Request — malformed query or invalid parameters.",
+    403: "Forbidden — access to this resource is not allowed.",
+    404: "Not Found — the requested paper or endpoint does not exist.",
+    429: "Too Many Requests — arXiv rate limit exceeded (max ~3 req/s); backing off.",
+    500: "Internal Server Error — something went wrong on arXiv's side.",
+    503: "Service Unavailable — arXiv is temporarily overloaded or under maintenance.",
+}
+
+_ARXIV_MAX_RETRIES = 10    # maximum retry attempts on 429 / 5xx / 503
+_ARXIV_MAX_WAIT    = 15.0  # seconds — exponential back-off ceiling
+
+
+async def _arxiv_request(
+    http: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs,
+) -> httpx.Response:
+    """
+    Central arXiv HTTP wrapper with:
+      • Full status-code descriptions for 200/400/403/404/429/500/503.
+      • Exponential back-off retry for 429, 500, and 503 responses.
+        - Up to _ARXIV_MAX_RETRIES (10) attempts.
+        - Wait = min(2^attempt, _ARXIV_MAX_WAIT) seconds (hard-capped at 15 s).
+        - Respects the Retry-After response header when present on 429.
+      • Raises httpx.HTTPStatusError with an enriched message on final failure.
+    """
+    last_exc: Optional[httpx.HTTPStatusError] = None
+
+    for attempt in range(_ARXIV_MAX_RETRIES + 1):
+        r = await http.request(method, url, **kwargs)
+
+        if r.status_code == 200:
+            return r
+
+        status_msg = _ARXIV_STATUS.get(r.status_code, f"HTTP {r.status_code} — unexpected status.")
+
+        # Non-retryable client errors — surface immediately
+        if r.status_code in (400, 403, 404):
+            raise httpx.HTTPStatusError(
+                f"arXiv {r.status_code}: {status_msg}",
+                request=r.request,
+                response=r,
+            )
+
+        # 429, 500, 503 (and any other 5xx) — retryable with exponential back-off
+        if r.status_code == 429 or r.status_code >= 500:
+            if attempt == _ARXIV_MAX_RETRIES:
+                last_exc = httpx.HTTPStatusError(
+                    f"arXiv {r.status_code}: {status_msg} "
+                    f"(gave up after {_ARXIV_MAX_RETRIES} retries)",
+                    request=r.request,
+                    response=r,
+                )
+                break
+
+            retry_after = r.headers.get("Retry-After", "")
+            if retry_after.isdigit():
+                wait = min(float(retry_after), _ARXIV_MAX_WAIT)
+            else:
+                wait = min(2.0 ** attempt, _ARXIV_MAX_WAIT)
+
+            await asyncio.sleep(wait)
+            continue
+
+        r.raise_for_status()
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Unexpected exit from _arxiv_request retry loop")
+
+
 async def _arxiv_search(http: httpx.AsyncClient, title: str) -> Optional[dict]:
-    """Search arXiv; return minimal dict with arxiv_id, pdf_url, summary."""
-    r = await http.get(
-        ARXIV_API,
+    """Search arXiv by title via Atom API (with retry); return minimal paper dict."""
+    r = await _arxiv_request(
+        http, "GET", ARXIV_API,
         params={
             "search_query": f'ti:"{title}"',
             "max_results": 1,
             "sortBy": "relevance",
         },
     )
-    r.raise_for_status()
     text = r.text
     if "<entry>" not in text:
         return None
@@ -252,12 +328,19 @@ async def _unpaywall_pdf(http: httpx.AsyncClient, doi: str) -> Optional[str]:
 
 
 async def _arxiv_fulltext(http: httpx.AsyncClient, arxiv_id: str) -> Optional[str]:
-    """Fetch plain-text content from arXiv's HTML5 renderer (up to 50k chars)."""
+    """
+    Fetch plain-text content from arXiv's HTML5 renderer (with retry).
+
+    Returns up to 50,000 chars of stripped plain text, or None when:
+      - The paper has no HTML version (older submissions, LaTeX-only).
+      - arXiv returns a non-article page (abstract page redirect, etc.).
+      - All retries are exhausted.
+    """
     url = f"https://arxiv.org/html/{arxiv_id}"
     try:
-        r = await http.get(url)
-        if r.status_code != 200 or "<article" not in r.text:
-            return None
+        r = await _arxiv_request(http, "GET", url)
+        if "<article" not in r.text:
+            return None   # HTML exists but is an abstract/redirect page
         text = re.sub(
             r"<(script|style)[^>]*>.*?</(script|style)>",
             "",
@@ -267,6 +350,11 @@ async def _arxiv_fulltext(http: httpx.AsyncClient, arxiv_id: str) -> Optional[st
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"\s+", " ", text)
         return text[:50_000].strip()
+    except httpx.HTTPStatusError as e:
+        # 404 → no HTML version for this paper (very common for old papers)
+        if e.response.status_code == 404:
+            return None
+        raise   # re-raise 429/5xx so callers can surface the error
     except Exception:
         return None
 
@@ -326,29 +414,59 @@ def _normalise_paper(paper: dict) -> dict:
 def _api_error(e: Exception) -> str:
     """Format API/network errors into structured, actionable JSON.
 
-    For Semantic Scholar errors the message already contains the official
-    status-code description from _S2_STATUS (injected by _s2_request).
+    Both _s2_request and _arxiv_request embed the source name and the official
+    status-code description in the exception message, so we parse that to return
+    a consistently shaped error object with a next-step hint.
+
+    Shape: { "error": str, "status_code": int, "source": str, "hint": str }
     """
     if isinstance(e, httpx.HTTPStatusError):
         code = e.response.status_code
-        # _s2_request embeds the human-readable description in str(e); use it
-        # directly so callers always see the full official S2 message.
         detail = str(e)
-        # Supplement with a next-step hint for common codes
-        hints: dict[int, str] = {
+
+        # Detect which API raised the error from the injected prefix
+        is_arxiv = detail.startswith("arXiv ")
+        source   = "arxiv" if is_arxiv else "semantic_scholar"
+
+        s2_hints: dict[int, str] = {
             400: "Double-check query parameters and try again.",
             401: "Provide a valid Semantic Scholar API key via the S2_API_KEY env var.",
             403: "Your account does not have access to this endpoint.",
             404: "The paper or resource was not found — try a different title or DOI.",
-            429: f"Rate limit reached. The server was retried {_S2_MAX_RETRIES} times "
-                 f"with back-off up to {_S2_MAX_WAIT}s. Wait a minute, then retry.",
+            429: (
+                f"Rate limit reached. The server was retried {_S2_MAX_RETRIES} times "
+                f"with exponential back-off up to {_S2_MAX_WAIT}s. "
+                "Wait a minute, then retry, or add an S2_API_KEY for a higher quota."
+            ),
             500: "Semantic Scholar is experiencing server-side issues. Try again later.",
         }
+        arxiv_hints: dict[int, str] = {
+            400: "Check your search query syntax — arXiv uses field prefixes like ti:, au:, abs:.",
+            403: "Access to this arXiv resource is restricted.",
+            404: "Paper not found on arXiv. The arXiv ID may be incorrect or the paper may be withdrawn.",
+            429: (
+                f"arXiv rate limit hit. The server was retried {_ARXIV_MAX_RETRIES} times "
+                f"with exponential back-off up to {_ARXIV_MAX_WAIT}s. "
+                "arXiv recommends ≤3 requests/second. Wait and try again."
+            ),
+            500: "arXiv is experiencing server-side issues. Check https://status.arxiv.org and try later.",
+            503: "arXiv is temporarily unavailable (maintenance or overload). Try again shortly.",
+        }
+
+        hints = arxiv_hints if is_arxiv else s2_hints
+        fallback = (
+            "See https://info.arxiv.org/help/api/index.html for arXiv API status."
+            if is_arxiv
+            else "See https://api.semanticscholar.org for Semantic Scholar API status."
+        )
+
         return json.dumps({
             "error": detail,
             "status_code": code,
-            "hint": hints.get(code, "See https://api.semanticscholar.org for API status."),
+            "source": source,
+            "hint": hints.get(code, fallback),
         })
+
     if isinstance(e, httpx.TimeoutException):
         return json.dumps({
             "error": "Request timed out.",
@@ -963,4 +1081,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

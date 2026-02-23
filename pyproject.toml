@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 # ── Project metadata ───────────────────────────────────────────────────────────
 [project]
 name = "paper-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "MCP server that retrieves academic papers by title — metadata, PDF, full text, citations, references."
 readme = "README.md"
 license = { text = "MIT" }
